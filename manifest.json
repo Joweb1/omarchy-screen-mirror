@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "jovibe.screen-mirror",
+  "name": "Screen Mirror",
+  "version": "1.0.0",
+  "author": "jovibe",
+  "description": "Mirror your laptop screen to any monitor you plug in, so both show exactly the same thing. Switch to extended desktop from the bar when you want a separate workspace.",
+  "license": "MIT",
+  "homepage": "https://github.com/Joweb1/omarchy-screen-mirror",
+  "repository": "https://github.com/Joweb1/omarchy-screen-mirror.git",
+  "keywords": ["monitor", "mirror", "external-display", "hyprland"],
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Screen Mirror",
+    "description": "Appears when an external monitor is connected; mirrors the laptop screen or extends the desktop",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "alwaysShow": false, "notify": true },
+    "schema": [
+      { "key": "alwaysShow", "type": "boolean", "label": "Show the icon even with no external screen", "defaultValue": false },
+      { "key": "notify", "type": "boolean", "label": "Notify when a screen is connected", "defaultValue": true }
+    ]
+  }
+}

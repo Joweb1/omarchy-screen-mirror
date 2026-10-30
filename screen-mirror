@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Display helper for the jovibe.screen-mirror bar widget.
+
+  screen-mirror status         JSON: saved mode, monitors, which mirror which
+  screen-mirror set mirror     remember "mirror" and apply it
+  screen-mirror set extend     remember "extend" and apply it
+  screen-mirror apply          apply the remembered mode (default: mirror)
+  screen-mirror watch          apply it again whenever a monitor is plugged in
+                               or the Hyprland config reloads; prints "changed"
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+                         "omarchy", "screen-mirror")
+MODE_FILE = os.path.join(STATE_DIR, "mode")
+INTERNAL = re.compile(r"^(eDP|LVDS|DSI)", re.I)
+
+
+def hyprctl(*args):
+    return subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=10)
+
+
+def monitors():
+    try:
+        out = hyprctl("-j", "monitors", "all").stdout
+        return [m for m in json.loads(out) if not m.get("disabled")]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
+def primary_of(mons):
+    for m in mons:
+        if INTERNAL.match(m["name"]):
+            return m["name"]
+    return mons[0]["name"] if mons else ""
+
+
+def get_mode():
+    try:
+        with open(MODE_FILE) as f:
+            mode = f.read().strip()
+        return mode if mode in ("mirror", "extend") else "mirror"
+    except OSError:
+        return "mirror"
+
+
+def save_mode(mode):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = MODE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(mode + "\n")
+    os.replace(tmp, MODE_FILE)
+
+
+def lua_str(text):
+    return json.dumps(text)  # JSON string escapes are valid Lua
+
+
+def monitor_rule(name, mirror_of):
+    """Hyprland's Lua config has no `keyword`; `hyprctl eval` runs hl.monitor()."""
+    position = "auto" if mirror_of else "auto-right"
+    return ("hl.monitor({ output = %s, mode = \"preferred\", position = \"%s\", scale = 1, mirror = %s })"
+            % (lua_str(name), position, lua_str(mirror_of)))
+
+
+def mirror_id(m):
+    """Hyprland reports mirrorOf as the source monitor's id (a string), or "none"."""
+    try:
+        return int(m.get("mirrorOf"))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_mirror(m):
+    return mirror_id(m) is not None
+
+
+def apply_mode(mode=None):
+    mode = mode or get_mode()
+    mons = monitors()
+    primary = primary_of(mons)
+    primary_id = next((m["id"] for m in mons if m["name"] == primary), None)
+    ok = True
+    for m in mons:
+        if m["name"] == primary:
+            continue
+        if mode == "mirror":
+            if mirror_id(m) == primary_id:
+                continue
+            rule = monitor_rule(m["name"], primary)
+        else:
+            if not is_mirror(m):
+                continue
+            rule = monitor_rule(m["name"], "")
+        res = hyprctl("eval", rule)
+        if res.returncode != 0 or "ok" not in res.stdout:
+            ok = False
+    return ok
+
+
+def status():
+    mons = monitors()
+    primary = primary_of(mons)
+    ids = {m["id"]: m["name"] for m in mons}
+    out = []
+    for m in mons:
+        mirror = m.get("mirrorOf")
+        out.append({
+            "name": m["name"],
+            "description": m.get("description", ""),
+            "width": m.get("width", 0),
+            "height": m.get("height", 0),
+            "primary": m["name"] == primary,
+            "mirrorOf": ids.get(mirror_id(m), ""),
+        })
+    return {"mode": get_mode(), "primary": primary, "monitors": out,
+            "external": sum(1 for m in out if not m["primary"])}
+
+
+def socket_path():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()),
+                        "hypr", sig, ".socket2.sock")
+
+
+def watch():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(socket_path())
+    apply_mode()
+    print("changed", flush=True)
+    buf = b""
+    pending = None
+    while True:
+        s.settimeout(0.6 if pending else None)
+        try:
+            data = s.recv(4096)
+            if not data:
+                return 1
+            buf += data
+        except socket.timeout:
+            data = None
+        if data:
+            *lines, buf = buf.split(b"\n")
+            for line in lines:
+                ev = line.decode(errors="replace").split(">>", 1)[0]
+                if ev in ("monitoradded", "monitoraddedv2", "monitorremoved",
+                          "monitorremovedv2", "configreloaded"):
+                    pending = time.monotonic()
+        # a plug-in sends a burst of events; act once the burst has settled
+        if pending and time.monotonic() - pending >= 0.5:
+            pending = None
+            apply_mode()
+            print("changed", flush=True)
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    if cmd == "status":
+        print(json.dumps(status()))
+        return 0
+    if cmd == "set" and len(argv) > 2 and argv[2] in ("mirror", "extend"):
+        save_mode(argv[2])
+        return 0 if apply_mode(argv[2]) else 1
+    if cmd == "apply":
+        return 0 if apply_mode() else 1
+    if cmd == "watch":
+        try:
+            return watch()
+        except (OSError, KeyboardInterrupt):
+            return 1
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
